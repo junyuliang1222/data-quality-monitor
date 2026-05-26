@@ -1,0 +1,292 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 style="margin-bottom: 20px;">质量看板</h2>
+
+<!-- 操作栏 -->
+<div class="card" style="display: flex; align-items: center; gap: 16px;">
+    <button class="btn btn-green" onclick="runChecks()" id="btn-run" style="padding: 10px 24px; font-size: 15px;">▶ 手动执行检查</button>
+    <span id="run-status" style="color: #999; font-size: 13px;"></span>
+    <span style="margin-left: auto; color: #999; font-size: 13px;" id="last-check-time"></span>
+</div>
+
+<!-- 统计卡片 -->
+<div class="stat-grid" style="margin-bottom: 20px;">
+    <div class="stat-card blue">
+        <div class="num" id="stat-total">--</div>
+        <div class="label">总规则数</div>
+    </div>
+    <div class="stat-card green">
+        <div class="num" id="stat-passed">--</div>
+        <div class="label">通过</div>
+    </div>
+    <div class="stat-card red">
+        <div class="num" id="stat-failed">--</div>
+        <div class="label">失败</div>
+    </div>
+    <div class="stat-card orange">
+        <div class="num" id="stat-violations">--</div>
+        <div class="label">违规总数</div>
+    </div>
+</div>
+
+<!-- 图表区域 -->
+<div class="charts-row">
+    <div class="card chart-box" id="chart-table" style="height: 380px;"></div>
+    <div class="card chart-box" id="chart-type" style="height: 380px;"></div>
+</div>
+
+<!-- 违规明细 -->
+<div class="card">
+    <h3>违规明细</h3>
+    <div id="violation-table-container">
+        <div class="empty-state">暂无检查记录，点击上方按钮执行检查</div>
+    </div>
+</div>
+
+<!-- 历史记录 -->
+<div class="card">
+    <h3>历史执行记录</h3>
+    <div id="history-table-container">
+        <div class="empty-state">暂无记录</div>
+    </div>
+</div>
+
+<!-- 下钻弹窗 -->
+<div class="modal-overlay" id="drill-modal">
+    <div class="modal">
+        <h3 id="drill-title">根因下钻</h3>
+        <div style="margin-bottom: 12px;">
+            <select id="drill-dimension" onchange="loadDrillDown()" style="padding:6px 10px; border:1px solid #d9d9d9; border-radius:4px;">
+                <option value="">选择维度...</option>
+            </select>
+        </div>
+        <div id="drill-chart" style="width:100%;height:300px;"></div>
+        <div style="text-align:right; margin-top:12px;">
+            <button class="btn" onclick="closeDrill()" style="background:#ddd;">关闭</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ========== 全局状态 ==========
+let currentExecutionId = null;
+let drillRuleId = null;
+let drillTargetTable = null;
+let drillChart = null;
+
+// ========== 初始化 ==========
+document.addEventListener('DOMContentLoaded', () => {
+    loadDashboard();
+});
+
+function loadDashboard() {
+    loadSummary();
+    loadIssueDistribution();
+    loadViolationDetails();
+    loadHistory();
+}
+
+// ========== 执行检查 ==========
+async function runChecks() {
+    const btn = document.getElementById('btn-run');
+    const status = document.getElementById('run-status');
+    btn.disabled = true;
+    btn.textContent = '⏳ 检查中...';
+    status.textContent = '正在执行全部规则检查，请稍候...';
+
+    try {
+        const res = await fetch('/api/run-checks', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'completed') {
+            status.textContent = `检查完成！耗时 ${(data.duration_ms / 1000).toFixed(1)}s`;
+        } else {
+            status.textContent = '检查失败：' + (data.error || '未知错误');
+        }
+        currentExecutionId = data.execution_id;
+    } catch (e) {
+        status.textContent = '请求失败：' + e.message;
+    }
+
+    btn.disabled = false;
+    btn.textContent = '▶ 手动执行检查';
+    loadDashboard();
+}
+
+// ========== 汇总卡片 ==========
+async function loadSummary() {
+    try {
+        const res = await fetch('/api/check-summary' + (currentExecutionId ? '?execution_id=' + currentExecutionId : ''));
+        const data = await res.json();
+        if (!data.execution_id) {
+            document.getElementById('last-check-time').textContent = '暂无检查记录';
+            return;
+        }
+        currentExecutionId = data.execution_id;
+        document.getElementById('stat-total').textContent = data.total_rules || 0;
+        document.getElementById('stat-passed').textContent = data.rules_passed || 0;
+        document.getElementById('stat-failed').textContent = data.rules_failed || 0;
+        document.getElementById('stat-violations').textContent = data.total_violations || 0;
+        document.getElementById('last-check-time').textContent = '上次检查：' + (data.started_at || '--');
+    } catch (e) {
+        console.error('loadSummary:', e);
+    }
+}
+
+// ========== 问题分布图 ==========
+async function loadIssueDistribution() {
+    try {
+        const res = await fetch('/api/issue-distribution' + (currentExecutionId ? '?execution_id=' + currentExecutionId : ''));
+        const data = await res.json();
+
+        // 按表柱状图
+        const chartTable = echarts.init(document.getElementById('chart-table'));
+        chartTable.setOption({
+            title: { text: '问题分布（按表）', left: 'center', textStyle: { fontSize: 14 } },
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: (data.by_table || []).map(d => d.target_table) },
+            yAxis: { type: 'value', name: '违规数' },
+            series: [{
+                type: 'bar',
+                data: (data.by_table || []).map(d => d.violations),
+                itemStyle: { color: '#1890ff' }
+            }],
+            grid: { top: 50, right: 20, bottom: 40, left: 50 }
+        });
+
+        // 按类型饼图
+        const chartType = echarts.init(document.getElementById('chart-type'));
+        chartType.setOption({
+            title: { text: '问题分布（按类型）', left: 'center', textStyle: { fontSize: 14 } },
+            tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+            series: [{
+                type: 'pie',
+                radius: ['40%', '70%'],
+                center: ['50%', '55%'],
+                data: (data.by_rule_type || []).map(d => ({ name: d.rule_type, value: d.violations })),
+                label: { fontSize: 11 }
+            }],
+            grid: { top: 40 }
+        });
+    } catch (e) {
+        console.error('loadIssueDistribution:', e);
+    }
+}
+
+// ========== 违规明细 ==========
+async function loadViolationDetails() {
+    const container = document.getElementById('violation-table-container');
+    try {
+        const res = await fetch('/api/violation-details' + (currentExecutionId ? '?execution_id=' + currentExecutionId : ''));
+        const data = await res.json();
+        if (!data.length) {
+            container.innerHTML = '<div class="empty-state">所有规则均通过，无违规数据 🎉</div>';
+            return;
+        }
+        let html = '<table><thead><tr><th>规则名称</th><th>目标表</th><th>类型</th><th>严重级别</th><th>违规数</th><th>耗时(ms)</th><th>操作</th></tr></thead><tbody>';
+        for (const row of data) {
+            const sevTag = 'tag-' + row.severity;
+            const statusTag = row.status === 'pass' ? 'tag-pass' : 'tag-fail';
+            html += `<tr>
+                <td>${row.rule_name}</td>
+                <td>${row.target_table}</td>
+                <td>${row.rule_type}</td>
+                <td><span class="tag ${sevTag}">${row.severity}</span></td>
+                <td>${row.violations_count}</td>
+                <td>${row.execution_time_ms}</td>
+                <td><button class="btn btn-orange" onclick="openDrill(${row.rule_id}, '${row.target_table}')">下钻</button></td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (e) {
+        console.error('loadViolationDetails:', e);
+    }
+}
+
+// ========== 历史记录 ==========
+async function loadHistory() {
+    const container = document.getElementById('history-table-container');
+    try {
+        const res = await fetch('/api/execution-history?limit=20');
+        const data = await res.json();
+        if (!data.length) {
+            container.innerHTML = '<div class="empty-state">暂无记录</div>';
+            return;
+        }
+        let html = '<table><thead><tr><th>#</th><th>开始时间</th><th>结束时间</th><th>触发方式</th><th>状态</th><th>通过</th><th>失败</th><th>违规</th></tr></thead><tbody>';
+        for (const row of data) {
+            const statusTag = row.status === 'completed' ? 'tag-pass' : (row.status === 'failed' ? 'tag-fail' : 'tag-info');
+            html += `<tr>
+                <td>${row.execution_id}</td>
+                <td>${row.started_at || '--'}</td>
+                <td>${row.ended_at || '--'}</td>
+                <td>${row.triggered_by}</td>
+                <td><span class="tag ${statusTag}">${row.status}</span></td>
+                <td>${row.rules_passed || 0}</td>
+                <td>${row.rules_failed || 0}</td>
+                <td>${row.total_violations || 0}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (e) {
+        console.error('loadHistory:', e);
+    }
+}
+
+// ========== 下钻分析 ==========
+function openDrill(ruleId, targetTable) {
+    drillRuleId = ruleId;
+    drillTargetTable = targetTable;
+    document.getElementById('drill-modal').classList.add('active');
+
+    // 根据表设置可选维度
+    const dimSelect = document.getElementById('drill-dimension');
+    const dimMap = {
+        'users': [['user_level', '会员等级'], ['created_at', '注册月份']],
+        'products': [['category', '品类']],
+        'orders': [['order_status', '订单状态'], ['order_date', '下单月份']],
+        'order_items': [['order_date', '下单时间']],
+    };
+    const dims = dimMap[targetTable] || [];
+    dimSelect.innerHTML = '<option value="">选择维度...</option>' +
+        dims.map(d => `<option value="${d[0]}">${d[1]}</option>`).join('');
+    dimSelect.value = '';
+
+    // 清空图表
+    if (drillChart) { drillChart.dispose(); drillChart = null; }
+    document.getElementById('drill-chart').innerHTML = '';
+}
+
+function closeDrill() {
+    document.getElementById('drill-modal').classList.remove('active');
+}
+
+async function loadDrillDown() {
+    const dimension = document.getElementById('drill-dimension').value;
+    if (!dimension) return;
+
+    try {
+        const res = await fetch(`/api/drill-down?rule_id=${drillRuleId}&execution_id=${currentExecutionId}&dimension=${dimension}`);
+        const data = await res.json();
+
+        const chartDom = document.getElementById('drill-chart');
+        if (drillChart) { drillChart.dispose(); }
+        drillChart = echarts.init(chartDom);
+        drillChart.setOption({
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: data.labels || [] },
+            yAxis: { type: 'value', name: '违规数' },
+            series: [{
+                type: 'bar',
+                data: data.values || [],
+                itemStyle: { color: '#fa8c16' }
+            }],
+            grid: { top: 10, right: 20, bottom: 30, left: 50 }
+        });
+    } catch (e) {
+        console.error('loadDrillDown:', e);
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 style="margin-bottom: 20px;">规则管理</h2>
+
+<div class="card">
+    <h3>全部质量规则</h3>
+    <div id="rules-table-container">
+        <div class="loading">加载中...</div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', loadRules);
+
+async function loadRules() {
+    const container = document.getElementById('rules-table-container');
+    try {
+        const res = await fetch('/api/rules');
+        const data = await res.json();
+        if (!data.length) {
+            container.innerHTML = '<div class="empty-state">暂无规则</div>';
+            return;
+        }
+
+        // 按 target_table 分组
+        const groups = {};
+        for (const row of data) {
+            if (!groups[row.target_table]) groups[row.target_table] = [];
+            groups[row.target_table].push(row);
+        }
+
+        let html = '';
+        for (const [table, rules] of Object.entries(groups)) {
+            html += `<h4 style="margin: 16px 0 8px; color: #555;">📋 ${table}（${rules.length} 条）</h4>`;
+            html += '<table><thead><tr><th>ID</th><th>规则名称</th><th>列</th><th>类型</th><th>级别</th><th>启用</th><th>描述</th></tr></thead><tbody>';
+            for (const r of rules) {
+                const sevTag = 'tag-' + r.severity;
+                const activeTag = r.is_active ? 'tag-pass' : 'tag-fail';
+                html += `<tr>
+                    <td>${r.rule_id}</td>
+                    <td>${r.rule_name}</td>
+                    <td>${r.target_column || '--'}</td>
+                    <td>${r.rule_type}</td>
+                    <td><span class="tag ${sevTag}">${r.severity}</span></td>
+                    <td><span class="tag ${activeTag}">${r.is_active ? '启用' : '禁用'}</span></td>
+                    <td style="color: #999; font-size: 13px;">${r.description || ''}</td>
+                </tr>`;
+            }
+            html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = '<div class="empty-state">加载失败：' + e.message + '</div>';
+    }
+}
+</script>
+{% endblock %}
